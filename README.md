@@ -1,8 +1,13 @@
+
 # DPlayer backend
 
 > Node.js backend for [DPlayer](https://github.com/DIYgod/DPlayer)
 
-## Usage
+## 使用
+
+演示地址：[自己搭建的API](https://api.menhood.wang)
+
+架设教程也在
 
 ### Start
 
