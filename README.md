@@ -7,7 +7,7 @@
 
 演示地址：[自己搭建的API](https://api.menhood.wang)
 
-架设教程也在
+架设教程也在[自己搭建的API](https://api.menhood.wang)里的DPlayer-Node-FAQ里面
 
 ### Start
 
