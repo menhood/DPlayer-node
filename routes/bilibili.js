@@ -1,134 +1,46 @@
-var url = require('url');
-var logger = require('../tools/logger');
-var redis = require('../tools/redis');
-var fetch = require('node-fetch');
-var parseString = require('xml2js').parseString;
+const fetch = require('node-fetch');
+const cheerio = require('cheerio');
 
-module.exports = function (req, res) {
-    res.header('content-type', 'application/json; charset=utf-8');
-    
-    var ip = req.headers['x-forwarded-for'] ||
-        req.connection.remoteAddress ||
-        req.socket.remoteAddress ||
-        req.connection.socket.remoteAddress;
+module.exports = async (ctx) => {
+    const aid = ctx.request.query.aid;
+    let cid = ctx.request.query.cid;
 
-    var query = url.parse(req.url,true).query;
-    var aid = query.aid;
-    var cid = query.cid;
-
-    function addZero(str, length){
-        return new Array(Math.max(length - str.length + 1, 0)).join("0") + str;
+    if (!cid && aid) {
+        cid = await ctx.redis.get(`v3bilibiliaid2cid${aid}`);
+        if (!cid) {
+            const res = await fetch(`http://www.bilibili.com/widget/getPageList?aid=${aid}`);
+            const result = await res.json();
+            cid = result[0].cid;
+            ctx.redis.set(`v3bilibiliaid2cid${aid}`, cid);
+        }
     }
-
-    if (cid) {
-        redis.client.get(`bilibilicid2dan${cid}`, function(err, reply) {
-            if (reply) {
-                logger.info(`Bilibili cid2dan ${cid} form redis, IP: ${ip}`);
-                res.send(reply);
-            }
-            else {
-                logger.info(`Bilibili cid2dan ${cid} form origin, IP: ${ip}`);
-
-                var dan = {
-                    code: 1,
-                    danmaku: []
-                };
-
-                fetch(`http://comment.bilibili.com/${cid}.xml`).then(
-                    response => response.text()
-                ).then((data) => {
-                        parseString(data, function (err, result) {
-                            var danOriginal = result.i.d;
-                            for (var i = 0; i < danOriginal.length; i++) {
-                                var info = danOriginal[i].$.p.split(',');
-                                var type = '';
-                                if (info[1] === '4') {
-                                    type = 'bottom';
-                                }
-                                else if (info[1] === '5') {
-                                    type = 'top';
-                                }
-                                else {
-                                    type = 'right';
-                                }
-                                var danOne = {
-                                    author: 'bilibili' + info[6],
-                                    time: info[0],
-                                    text: danOriginal[i]._,
-                                    color: '#' + addZero(parseInt(info[3]).toString(16), 6),
-                                    type: type
-                                };
-                                dan.danmaku.push(danOne);
-                            }
-                            var sendDan = JSON.stringify(dan);
-                            res.send(sendDan);
-
-                            redis.set(`bilibilicid2dan${cid}`, sendDan);
-                        });
-                    }
-                ).catch(
-                    e => logger.error("Bilibilib Error: getting danmaku", e)
-                );
-            }
+    let data = await ctx.redis.get(`v3bilibilicid2dan${cid}`);
+    if (data) {
+        ctx.response.set('X-Koa-Redis', 'true');
+        data = JSON.parse(data);
+    } else {
+        const res = await fetch(`https://api.bilibili.com/x/v1/dm/list.so?oid=${cid}`);
+        const result = await res.text();
+        const $ = cheerio.load(result.replace(/[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f]/g, ''), {
+            xmlMode: true
         });
-    }
-    else {
-        redis.client.get(`bilibiliaid2dan${aid}`, function(err, reply) {
-            if (reply) {
-                logger.info(`Bilibili aid2dan ${aid} form redis, IP: ${ip}`);
-                res.send(reply);
+        data = $('d').map((i, el) => {
+            const item = $(el);
+            const p = item.attr('p').split(',');
+            let type = 0;
+            if (p[1] === '4') {
+                type = 2;
             }
-            else {
-                logger.info(`Bilibili aid2dan ${aid} form origin, IP: ${ip}`);
-
-                var dan = {
-                    code: 1,
-                    danmaku: []
-                };
-
-                fetch(`http://www.bilibili.com/widget/getPageList?aid=${aid}`).then(
-                    response => response.json()
-                ).then((data) => {
-                        fetch(`http://comment.bilibili.com/${data[0].cid}.xml`).then(
-                            response => response.text()
-                        ).then((data) => {
-                                parseString(data, function (err, result) {
-                                    var danOriginal = result.i.d;
-                                    for (var i = 0; i < danOriginal.length; i++) {
-                                        var info = danOriginal[i].$.p.split(',');
-                                        var type = '';
-                                        if (info[1] === '4') {
-                                            type = 'bottom';
-                                        }
-                                        else if (info[1] === '5') {
-                                            type = 'top';
-                                        }
-                                        else {
-                                            type = 'right';
-                                        }
-                                        var danOne = {
-                                            author: 'bilibili' + info[6],
-                                            time: info[0],
-                                            text: danOriginal[i]._,
-                                            color: '#' + addZero(parseInt(info[3]).toString(16), 6),
-                                            type: type
-                                        };
-                                        dan.danmaku.push(danOne);
-                                    }
-                                    var sendDan = JSON.stringify(dan);
-                                    res.send(sendDan);
-
-                                    redis.set(`bilibiliaid2dan${aid}`, sendDan);
-                                });
-                            }
-                        ).catch(
-                            e => logger.error("Bilibilib Error: getting danmaku", e)
-                        );
-                    }
-                ).catch(
-                    e => logger.error("Bilibilib Error: getting cid", e)
-                );
+            else if (p[1] === '5') {
+                type = 1;
             }
-        });
+            return [[parseFloat(p[0]), type, parseInt(p[3]), p[6], item.text()]];
+        }).get();
+        ctx.redis.set(`v3bilibilicid2dan${cid}`, JSON.stringify(data), 10 * 60);
+        ctx.response.set('X-Koa-Origin', 'true');
     }
+    ctx.body = JSON.stringify({
+        code: 0,
+        data: data,
+    });
 };
